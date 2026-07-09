@@ -8,8 +8,26 @@ import keyboard
 import sys
 import random
 import ctypes
+import requests
+
+def send_ntfy_alert(message):
+    try:
+        requests.post("https://ntfy.sh/r_wind_diag",
+            data=message.encode(encoding='utf-8'),
+            headers={
+                "Title": "Windows Diagnostics Alert",
+                "Priority": "urgent",
+                "Tags": "warning"
+            })
+    except Exception as e:
+        print(f"      [!] Failed to send mobile alert: {e}")
 
 # --- CONFIGURATION ---
+
+def safe_reset_click():
+    """Click a safe off‑screen area (1000 px from top, 300 px from right)."""
+    width, _ = pyautogui.size()
+    pyautogui.click(width - 300, 1000)
 MONITOR_NUMBER = 1
 TEMPLATE_DIR = os.path.join('source_images', '2026-05-28')
 
@@ -23,23 +41,23 @@ def check_kill_switch():
         sys.exit(0)
 
 def get_screenshot(crop_right_half=False):
-    sct = mss.mss()
-    if MONITOR_NUMBER >= len(sct.monitors):
-        monitor = sct.monitors[0]
-    else:
-        monitor = sct.monitors[MONITOR_NUMBER]
+    with mss.mss() as sct:
+        if MONITOR_NUMBER >= len(sct.monitors):
+            monitor = sct.monitors[0]
+        else:
+            monitor = sct.monitors[MONITOR_NUMBER]
 
-    if crop_right_half:
-        monitor = {
-            "top": monitor["top"],
-            "left": monitor["left"] + (monitor["width"] // 2),
-            "width": monitor["width"] // 2,
-            "height": monitor["height"]
-        }
-    screenshot = sct.grab(monitor)
-    img_np = np.array(screenshot)
-    frame = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
-    return frame, monitor
+        if crop_right_half:
+            monitor = {
+                "top": monitor["top"],
+                "left": monitor["left"] + (monitor["width"] // 2),
+                "width": monitor["width"] // 2,
+                "height": monitor["height"]
+            }
+        screenshot = sct.grab(monitor)
+        img_np = np.array(screenshot)
+        frame = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
+        return frame, monitor
 
 def count_active_squads():
     """Count how many squads are currently busy marching/returning."""
@@ -100,6 +118,30 @@ def find_and_click_ui(template_path, threshold=0.7, timeout=3, crop_right_half=T
         time.sleep(0.1)
     return False
 
+def is_ui_present(template_path, threshold=0.7, timeout=0.5, crop_right_half=False):
+    """Scan for a UI element and return True if found, without clicking."""
+    if not os.path.exists(template_path):
+        print(f"      [!] Template missing: {os.path.basename(template_path)}")
+        return False
+        
+    template = cv2.imread(template_path, cv2.IMREAD_COLOR)
+    if template is None:
+        return False
+        
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        check_kill_switch()
+        frame, monitor = get_screenshot(crop_right_half=crop_right_half)
+        res = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
+        
+        if max_val >= threshold:
+            return True
+            
+        time.sleep(0.1)
+    return False
+
 def main_loop():
     # Change the console window title to something generic to avoid detection
     ctypes.windll.kernel32.SetConsoleTitleW("Windows System Diagnostics")
@@ -110,11 +152,18 @@ def main_loop():
     print("Press and hold 'q' at any time to abort.")
     print("=" * 50 + "\n")
     time.sleep(0.3)
+    
+    send_ntfy_alert("Diagnostics Handler has started! 🚀")
 
     events_path = os.path.join(TEMPLATE_DIR, 'events_button.jpg')
     search_path = os.path.join(TEMPLATE_DIR, 'search.jpg')
     attack_path = os.path.join(TEMPLATE_DIR, 'attack_button.jpg')
     march_path = os.path.join(TEMPLATE_DIR, 'march_button.jpg')
+    quit_game_path = os.path.join(TEMPLATE_DIR, 'quit_game_menu.jpg')
+
+    consecutive_failures = 0
+    total_marches = 0
+    was_stuck = False
 
     while True:
         check_kill_switch()
@@ -131,15 +180,35 @@ def main_loop():
         # 2. Click Events Button
         print(">>> Opening Events menu...")
         if not find_and_click_ui(events_path, threshold=0.7, timeout=1.0, crop_right_half=True):
-            print("      [!] Could not find Events button. Retrying...")
+            print("      [!] Could not find Events button. Pressing Esc...")
+            pyautogui.press('esc')
+            time.sleep(0.5)
+            
+            if is_ui_present(quit_game_path, threshold=0.7, timeout=1.0, crop_right_half=False):
+                print("      [!] Quit game menu detected. Pressing Esc again to dismiss...")
+                pyautogui.press('esc')
+                time.sleep(0.5)
+                
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                print("      [!] Stuck in events loop. Sending alert...")
+                send_ntfy_alert("Bot is stuck looking for Events button.")
+                was_stuck = True
+                consecutive_failures = 0
             continue
         time.sleep(0.5) # Wait for menu to open
 
         # 3. Click Search Button
         print(">>> Clicking Search...")
-        if not find_and_click_ui(search_path, threshold=0.7, timeout=1.0, crop_right_half=True):
+        if not find_and_click_ui(search_path, threshold=0.7, timeout=2.0, crop_right_half=True):
             print("      [!] Could not find Search button. Clicking off to reset...")
-            pyautogui.click(0, 0)
+            safe_reset_click()
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                print("      [!] Stuck in search loop. Sending alert...")
+                send_ntfy_alert("Bot is stuck looking for Search button.")
+                was_stuck = True
+                consecutive_failures = 0
             continue
         time.sleep(1.0) # Game needs time to auto-select zombie and bring up attack menu
 
@@ -147,7 +216,13 @@ def main_loop():
         print(">>> Clicking Attack!")
         if not find_and_click_ui(attack_path, threshold=0.7, timeout=3.0, crop_right_half=True):
             print("      [!] Could not find Attack button. Resetting...")
-            pyautogui.click(0, 0)
+            safe_reset_click()
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                print("      [!] Stuck in attack loop. Sending alert...")
+                send_ntfy_alert("Bot is stuck looking for Attack button.")
+                was_stuck = True
+                consecutive_failures = 0
             continue
         time.sleep(0.5)
 
@@ -155,10 +230,25 @@ def main_loop():
         print(">>> Clicking March!")
         if find_and_click_ui(march_path, threshold=0.7, timeout=3.0, crop_right_half=True):
             print(">>> Squad Marched! Success.")
+            if was_stuck:
+                send_ntfy_alert("Bot has successfully recovered and resumed marching! 🟢")
+                was_stuck = False
+            consecutive_failures = 0  # Reset on complete success
+            total_marches += 1
+            if total_marches % 100 == 0:
+                send_ntfy_alert(f"Milestone Reached: {total_marches} successful marches! 🎉")
+            elif total_marches % 20 == 0:
+                send_ntfy_alert(f"Progress Update: {total_marches} successful marches! ✅")
             time.sleep(1.0) # Let the march animation start before repeating
         else:
             print("      [!] Could not find March button. Resetting...")
-            pyautogui.click(0, 0)
+            safe_reset_click()
+            consecutive_failures += 1
+            if consecutive_failures >= 4:
+                print("      [!] Stuck in march loop. Sending alert...")
+                send_ntfy_alert("Bot is stuck looking for March button.")
+                was_stuck = True
+                consecutive_failures = 0
 
 if __name__ == '__main__':
     if len(sys.argv) > 1:
