@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+local_config/
+match_crop.jpg
+free_zombie_mask.jpg
+window_captured.jpg
+game_physical.jpg
+win_raw.jpg

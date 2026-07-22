@@ -9,6 +9,15 @@ import sys
 import random
 import ctypes
 import requests
+import configparser
+
+try:
+    ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
 
 def send_ntfy_alert(message):
     try:
@@ -24,12 +33,73 @@ def send_ntfy_alert(message):
 
 # --- CONFIGURATION ---
 
+def move_mouse_human(end_x, end_y, duration=0.3):
+    """Move the mouse using a randomized bezier curve to simulate human movement."""
+    start_x, start_y = pyautogui.position()
+    dist = np.sqrt((end_x - start_x)**2 + (end_y - start_y)**2)
+    
+    if dist < 10:
+        ctypes.windll.user32.SetCursorPos(int(end_x), int(end_y))
+        return
+
+    p0 = np.array([start_x, start_y])
+    p3 = np.array([end_x, end_y])
+    deviation = min(dist / 4, 150)
+    
+    p1 = np.array([
+        start_x + (end_x - start_x) * random.uniform(0.1, 0.4) + random.uniform(-deviation, deviation),
+        start_y + (end_y - start_y) * random.uniform(0.1, 0.4) + random.uniform(-deviation, deviation)
+    ])
+    p2 = np.array([
+        start_x + (end_x - start_x) * random.uniform(0.6, 0.9) + random.uniform(-deviation, deviation),
+        start_y + (end_y - start_y) * random.uniform(0.6, 0.9) + random.uniform(-deviation, deviation)
+    ])
+    
+    steps = int(max(dist / 10, 20))
+    steps = min(steps, 60)
+    sleep_per_step = duration / steps
+    
+    for i in range(1, steps + 1):
+        t = i / steps
+        t_eased = t * t * (3.0 - 2.0 * t) # smooth step
+        
+        pos = (
+            (1-t_eased)**3 * p0 +
+            3 * (1-t_eased)**2 * t_eased * p1 +
+            3 * (1-t_eased) * t_eased**2 * p2 +
+            t_eased**3 * p3
+        )
+        ctypes.windll.user32.SetCursorPos(int(pos[0]), int(pos[1]))
+        time.sleep(sleep_per_step)
+        
+    ctypes.windll.user32.SetCursorPos(int(end_x), int(end_y))
+
 def safe_reset_click():
-    """Click a safe off‑screen area (1000 px from top, 300 px from right)."""
+    """Click a safe off-screen area (1000px from top, 300px from right)."""
     width, _ = pyautogui.size()
-    pyautogui.click(width - 300, 1000)
+    move_mouse_human(width - 300, 1000, duration=0.25)
+    pyautogui.click()
 MONITOR_NUMBER = 1
+
+LOCAL_TEMPLATE_DIR = os.path.join('local_config', 'templates')
 TEMPLATE_DIR = os.path.join('source_images', '2026-05-28')
+if os.path.exists(LOCAL_TEMPLATE_DIR) and len(os.listdir(LOCAL_TEMPLATE_DIR)) > 0:
+    print("[*] Using custom templates from local_config/templates")
+    TEMPLATE_DIR = LOCAL_TEMPLATE_DIR
+
+CONFIG_FILE = os.path.join('local_config', 'config.ini')
+WINDOW_BOUNDS = None
+if os.path.exists(CONFIG_FILE):
+    config = configparser.ConfigParser()
+    config.read(CONFIG_FILE)
+    if 'Window' in config:
+        WINDOW_BOUNDS = {
+            "left": int(config['Window']['left']),
+            "top": int(config['Window']['top']),
+            "width": int(config['Window']['width']),
+            "height": int(config['Window']['height'])
+        }
+        print(f"[*] Loaded window bounds from config: {WINDOW_BOUNDS}")
 
 SQUAD_BUSY_WAIT = 2  # seconds
 SQUAD_LIMIT = 4
@@ -42,18 +112,22 @@ def check_kill_switch():
 
 def get_screenshot(crop_right_half=False):
     with mss.mss() as sct:
-        if MONITOR_NUMBER >= len(sct.monitors):
-            monitor = sct.monitors[0]
+        if WINDOW_BOUNDS is not None:
+            monitor = WINDOW_BOUNDS
         else:
-            monitor = sct.monitors[MONITOR_NUMBER]
+            if MONITOR_NUMBER >= len(sct.monitors):
+                monitor = sct.monitors[0]
+            else:
+                monitor = sct.monitors[MONITOR_NUMBER]
 
-        if crop_right_half:
-            monitor = {
-                "top": monitor["top"],
-                "left": monitor["left"] + (monitor["width"] // 2),
-                "width": monitor["width"] // 2,
-                "height": monitor["height"]
-            }
+            if crop_right_half:
+                monitor = {
+                    "top": monitor["top"],
+                    "left": monitor["left"] + (monitor["width"] // 2),
+                    "width": monitor["width"] // 2,
+                    "height": monitor["height"]
+                }
+                
         screenshot = sct.grab(monitor)
         img_np = np.array(screenshot)
         frame = cv2.cvtColor(img_np, cv2.COLOR_BGRA2BGR)
@@ -65,9 +139,10 @@ def count_active_squads():
     if not os.path.exists(path):
         return 0
     template = cv2.imread(path, cv2.IMREAD_COLOR)
+    h, w = template.shape[:2]
     frame, _ = get_screenshot(crop_right_half=False)
     res = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
-    threshold = 0.85
+    threshold = 0.80
     loc = np.where(res >= threshold)
     points = list(zip(*loc[::-1]))
     if not points:
@@ -76,7 +151,7 @@ def count_active_squads():
     for pt in points:
         is_new = True
         for cluster in clusters:
-            if abs(pt[0] - cluster[0]) < 20 and abs(pt[1] - cluster[1]) < 20:
+            if abs(pt[0] - cluster[0]) < w and abs(pt[1] - cluster[1]) < h:
                 is_new = False
                 break
         if is_new:
@@ -111,7 +186,7 @@ def find_and_click_ui(template_path, threshold=0.7, timeout=3, crop_right_half=T
             
             # Randomize movement duration slightly
             move_duration = random.uniform(0.15, 0.35)
-            pyautogui.moveTo(abs_x, abs_y, duration=move_duration)
+            move_mouse_human(abs_x, abs_y, duration=move_duration)
             pyautogui.click()
             return True
             
@@ -226,6 +301,13 @@ def main_loop():
             continue
         time.sleep(0.5)
 
+        # Check for out-of-stamina popup
+        stamina_empty_path = os.path.join(TEMPLATE_DIR, 'stamina_empty.jpg')
+        if os.path.exists(stamina_empty_path) and is_ui_present(stamina_empty_path, threshold=0.7, timeout=1.0, crop_right_half=False):
+             print("      [!] Stamina empty detected! Sending alert and exiting...")
+             send_ntfy_alert("Out of stamina! 💤 Bot has stopped. Please refill stamina and restart.")
+             sys.exit(0)
+
         # 5. Click March
         print(">>> Clicking March!")
         if find_and_click_ui(march_path, threshold=0.7, timeout=3.0, crop_right_half=True):
@@ -251,7 +333,25 @@ def main_loop():
                 consecutive_failures = 0
 
 if __name__ == '__main__':
-    if len(sys.argv) > 1:
+    config_target = None
+    for arg in sys.argv:
+        if arg.startswith('--config-run='):
+            config_target = arg.split('=')[1]
+            break
+            
+    if '--config-run' in sys.argv or config_target:
+        import configurator
+        configurator.run_calibration(target_key=config_target)
+        print("[*] Configuration complete. Please run the bot again!")
+        sys.exit(0)
+    elif not os.path.exists(CONFIG_FILE):
+        print("[*] Initial setup detected. Launching configuration flow...")
+        import configurator
+        configurator.run_calibration()
+        print("[*] Configuration complete. Please run the bot again!")
+        sys.exit(0)
+
+    if len(sys.argv) > 1 and sys.argv[1] != '--config-run':
         try:
             SQUAD_LIMIT = int(sys.argv[1])
         except ValueError:
