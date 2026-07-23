@@ -334,11 +334,38 @@ def main_loop():
 
 if __name__ == '__main__':
     config_target = None
+    clicker_mode = False
+    click_rate = 50.0  # Default to 50 clicks per second
+
     for arg in sys.argv:
         if arg.startswith('--config-run='):
             config_target = arg.split('=')[1]
-            break
+        elif arg == '--clicker':
+            clicker_mode = True
+        elif arg.startswith('--clicker='):
+            clicker_mode = True
+            try:
+                click_rate = float(arg.split('=')[1])
+            except ValueError:
+                print(f"[!] Invalid click rate '{arg}'. Using default: {click_rate}")
             
+    if clicker_mode:
+        print("\n" + "=" * 50)
+        print(f"Button Clicker Mode Running... ({click_rate} clicks/sec)")
+        print("Move the mouse manually. The bot will auto-click.")
+        print("Press 'q' or Alt-Tab and Ctrl+C in this terminal to stop.")
+        print("=" * 50 + "\n")
+        
+        sleep_time = 1.0 / click_rate if click_rate > 0 else 0.02
+        try:
+            while True:
+                check_kill_switch()
+                pyautogui.click()
+                time.sleep(sleep_time)
+        except KeyboardInterrupt:
+            print("\n[!] Exiting Clicker Mode...")
+            sys.exit(0)
+
     if '--config-run' in sys.argv or config_target:
         import configurator
         configurator.run_calibration(target_key=config_target)
