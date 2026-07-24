@@ -11,6 +11,7 @@ import ctypes
 import requests
 import configparser
 import paho.mqtt.client as mqtt
+import pygetwindow as gw
 
 BOT_STATE = "running"
 MQTT_CONFIG = None
@@ -270,6 +271,43 @@ def setup_mqtt():
     except Exception as e:
         print(f"[!] MQTT Connection Error: {e}")
 
+def snap_window_to_right():
+    windows = gw.getWindowsWithTitle('Last War-Survival Game')
+    if not windows:
+        print("      [!] Could not find 'Last War-Survival Game' window to resize.")
+        return
+        
+    win = windows[0]
+    
+    # Get primary monitor size
+    screen_width = ctypes.windll.user32.GetSystemMetrics(0)
+    screen_height = ctypes.windll.user32.GetSystemMetrics(1)
+    
+    half_width = screen_width // 2
+    
+    try:
+        if win.isMinimized:
+            win.restore()
+        
+        # Unmaximize first if it's maximized
+        if win.isMaximized:
+            win.restore()
+            
+        win.moveTo(half_width, 0)
+        win.resizeTo(half_width, screen_height)
+        
+        print(f"[*] Snapped game to right half: Left {half_width}, Width {half_width}x{screen_height}")
+        
+        # Update our active bounds in memory so mss captures the right area
+        global WINDOW_BOUNDS
+        if WINDOW_BOUNDS is not None:
+            WINDOW_BOUNDS["left"] = half_width
+            WINDOW_BOUNDS["top"] = 0
+            WINDOW_BOUNDS["width"] = half_width
+            WINDOW_BOUNDS["height"] = screen_height
+    except Exception as e:
+        print(f"      [!] Failed to resize window: {e}")
+
 def main_loop():
     # Change the console window title to something generic to avoid detection
     ctypes.windll.kernel32.SetConsoleTitleW("Windows System Diagnostics")
@@ -277,6 +315,7 @@ def main_loop():
     global BOT_STATE
     BOT_STATE = "running"
     setup_mqtt()
+    snap_window_to_right()
     
     print("\n" + "=" * 50)
     print("Diagnostics Handler Running...")
