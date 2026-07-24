@@ -10,7 +10,10 @@ import random
 import ctypes
 import requests
 import configparser
+import paho.mqtt.client as mqtt
 
+BOT_STATE = "running"
+MQTT_CONFIG = None
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
 except Exception:
@@ -100,6 +103,16 @@ if os.path.exists(CONFIG_FILE):
             "height": int(config['Window']['height'])
         }
         print(f"[*] Loaded window bounds from config: {WINDOW_BOUNDS}")
+    if 'MQTT' in config:
+        MQTT_CONFIG = {
+            "broker": config['MQTT'].get('broker', ''),
+            "port": int(config['MQTT'].get('port', 8883)),
+            "username": config['MQTT'].get('username', ''),
+            "password": config['MQTT'].get('password', ''),
+            "topic": config['MQTT'].get('topic', 'bot/control'),
+            "client_id": config['MQTT'].get('client_id', 'windows-diagnostics-bot')
+        }
+        print(f"[*] Loaded MQTT config for remote control.")
 
 SQUAD_BUSY_WAIT = 2  # seconds
 SQUAD_LIMIT = 4
@@ -217,9 +230,53 @@ def is_ui_present(template_path, threshold=0.7, timeout=0.5, crop_right_half=Fal
         time.sleep(0.1)
     return False
 
+def setup_mqtt():
+    if not MQTT_CONFIG or not MQTT_CONFIG.get("username") or MQTT_CONFIG.get("username") == "YOUR_HIVEMQ_USERNAME":
+        print("[*] MQTT not configured or using default placeholders. Remote control disabled.")
+        return
+
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print("[*] Connected to MQTT broker! Listening for commands...")
+            client.subscribe(MQTT_CONFIG["topic"])
+        else:
+            print(f"[!] Failed to connect to MQTT broker. Code: {rc}")
+
+    def on_message(client, userdata, msg):
+        global BOT_STATE
+        payload = msg.payload.decode('utf-8').lower().strip()
+        if payload == "pause":
+            BOT_STATE = "paused"
+            send_ntfy_alert("Bot PAUSED via remote control. ⏸️")
+            print("\n[*] Received PAUSE command.")
+        elif payload == "resume":
+            BOT_STATE = "running"
+            send_ntfy_alert("Bot RESUMED via remote control. ▶️")
+            print("\n[*] Received RESUME command.")
+        elif payload == "stop":
+            BOT_STATE = "stopped"
+            send_ntfy_alert("Bot STOPPED via remote control. ⏹️")
+            print("\n[*] Received STOP command.")
+
+    client = mqtt.Client(MQTT_CONFIG["client_id"])
+    client.tls_set() # Enable SSL/TLS
+    client.username_pw_set(MQTT_CONFIG["username"], MQTT_CONFIG["password"])
+    client.on_connect = on_connect
+    client.on_message = on_message
+
+    try:
+        client.connect(MQTT_CONFIG["broker"], MQTT_CONFIG["port"], 60)
+        client.loop_start()
+    except Exception as e:
+        print(f"[!] MQTT Connection Error: {e}")
+
 def main_loop():
     # Change the console window title to something generic to avoid detection
     ctypes.windll.kernel32.SetConsoleTitleW("Windows System Diagnostics")
+    
+    global BOT_STATE
+    BOT_STATE = "running"
+    setup_mqtt()
     
     print("\n" + "=" * 50)
     print("Diagnostics Handler Running...")
@@ -242,6 +299,15 @@ def main_loop():
 
     while True:
         check_kill_switch()
+        
+        if BOT_STATE == "paused":
+            print(f"[{time.strftime('%H:%M:%S')}] Bot is paused via remote control. Waiting...", end='\r')
+            time.sleep(2)
+            continue
+        elif BOT_STATE == "stopped":
+            print("\n[!] Bot was stopped via remote control. Exiting...")
+            sys.exit(0)
+            
         squads_busy = count_active_squads()
         
         # 1. Wait for available squad
