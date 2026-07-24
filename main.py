@@ -235,7 +235,7 @@ def setup_mqtt():
         print("[*] MQTT not configured or using default placeholders. Remote control disabled.")
         return
 
-    def on_connect(client, userdata, flags, rc):
+    def on_connect(client, userdata, flags, rc, properties=None):
         if rc == 0:
             print("[*] Connected to MQTT broker! Listening for commands...")
             client.subscribe(MQTT_CONFIG["topic"])
@@ -258,7 +258,7 @@ def setup_mqtt():
             send_ntfy_alert("Bot STOPPED via remote control. ⏹️")
             print("\n[*] Received STOP command.")
 
-    client = mqtt.Client(MQTT_CONFIG["client_id"])
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, MQTT_CONFIG["client_id"])
     client.tls_set() # Enable SSL/TLS
     client.username_pw_set(MQTT_CONFIG["username"], MQTT_CONFIG["password"])
     client.on_connect = on_connect
