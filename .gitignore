@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
-local_config/
+local_config/*
+!local_config/config_sample.ini
 match_crop.jpg
 free_zombie_mask.jpg
 window_captured.jpg
